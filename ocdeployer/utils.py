@@ -208,6 +208,7 @@ def _exec_oc(*args, **kwargs):
     _retry_conflicts = kwargs.pop("_retry_conflicts", True)
 
     kwargs["_bg"] = True
+    kwargs["_bg_exc"] = False
 
     err_lines = []
     out_lines = []
@@ -226,11 +227,11 @@ def _exec_oc(*args, **kwargs):
     retries = 3
     last_err = None
     for count in range(1, retries + 1):
+        cmd = sh.oc(*args, **kwargs, _tee=True, _out=_out_line_handler, _err=_err_line_handler)
+        if not _silent:
+            cmd_args, cmd_kwargs = _get_logging_args(args, kwargs)
+            log.info("running (pid %d): oc %s %s", cmd.pid, cmd_args, cmd_kwargs)
         try:
-            cmd = sh.oc(*args, **kwargs, _tee=True, _out=_out_line_handler, _err=_err_line_handler)
-            if not _silent:
-                cmd_args, cmd_kwargs = _get_logging_args(args, kwargs)
-                log.info("running (pid %d): oc %s %s", cmd.pid, cmd_args, cmd_kwargs)
             return cmd.wait()
         except ErrorReturnCode as err:
             # Sometimes stdout/stderr is empty in the exception even though we appended
