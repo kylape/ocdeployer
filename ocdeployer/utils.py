@@ -207,16 +207,18 @@ def _exec_oc(*args, **kwargs):
     _ignore_immutable = kwargs.pop("_ignore_immutable", True)
     _retry_conflicts = kwargs.pop("_retry_conflicts", True)
 
-    kwargs["_bg_exc"] = True
+    kwargs["_bg"] = True
 
     err_lines = []
     out_lines = []
 
-    def _err_line_handler(line):
+    def _err_line_handler(line, _, process):
+        threading.current_thread().name = f"pid-{process.pid}"
         log.info(" |stderr| %s", line.rstrip())
         err_lines.append(line)
 
-    def _out_line_handler(line):
+    def _out_line_handler(line, _, process):
+        threading.current_thread().name = f"pid-{process.pid}"
         if not _silent:
             log.info(" |stdout| %s", line.rstrip())
         out_lines.append(line)
@@ -225,12 +227,11 @@ def _exec_oc(*args, **kwargs):
     last_err = None
     for count in range(1, retries + 1):
         try:
+            cmd = sh.oc(*args, **kwargs, _tee=True, _out=_out_line_handler, _err=_err_line_handler)
             if not _silent:
                 cmd_args, cmd_kwargs = _get_logging_args(args, kwargs)
-                log.info("Running command: oc %s %s", cmd_args, cmd_kwargs)
-            return sh.oc(
-                *args, **kwargs, _tee=True, _out=_out_line_handler, _err=_err_line_handler
-            ).wait()
+                log.info("running (pid %d): oc %s %s", cmd.pid, cmd_args, cmd_kwargs)
+            return cmd.wait()
         except ErrorReturnCode as err:
             # Sometimes stdout/stderr is empty in the exception even though we appended
             # data in the callback. Perhaps buffers are not being flushed ... so just
@@ -467,12 +468,23 @@ def wait_for_ready(restype, name, timeout=300, exit_on_err=False, _result_dict=N
 
     log.info("Waiting up to %dsec for '%s' to complete", timeout, key)
 
+    time_last_logged = time.time()
+    time_remaining = timeout
+
     def _complete():
+        nonlocal time_last_logged, time_remaining
+
         j = get_json(restype, name)
         if _check_status_for_restype(restype, j):
             _result_dict[key] = True
             log.info("'%s' is ready!", key)
             return True
+
+        if time.time() > time_last_logged + 60:
+            time_remaining -= 60
+            if time_remaining:
+                log.info("waiting %dsec longer for '%s' to complete", time_remaining, key)
+                time_last_logged = time.time()
         return False
 
     try:
@@ -484,11 +496,15 @@ def wait_for_ready(restype, name, timeout=300, exit_on_err=False, _result_dict=N
             log_on_loop=True,
         )
         return True
-    except (TimedOutError, StatusError):
-        log.exception("Hit error waiting on '%s'", key)
-        if exit_on_err:
-            sys.exit(1)
-        return False
+    except TimedOutError:
+        log.error("timed out waiting on '%s'!", key)
+    except StatusError as err:
+        log.error(str(err))
+
+    # if we made it here, we didn't return 'true'
+    if exit_on_err:
+        sys.exit(1)
+    return False
 
 
 def wait_for_ready_threaded(restype_name_list, timeout=300, exit_on_err=False):
@@ -510,6 +526,8 @@ def wait_for_ready_threaded(restype_name_list, timeout=300, exit_on_err=False):
         for restype, name in restype_name_list
     ]
     for thread in threads:
+        thread.daemon = True
+        thread.name = thread.name.lower()  # because I'm picky
         thread.start()
     for thread in threads:
         thread.join()
